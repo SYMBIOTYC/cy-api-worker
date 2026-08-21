@@ -1,0 +1,24 @@
+# Large binaries - downloaded at build time
+bin/**/cy-core
+bin/**/cy
+*.vsix
+zicaT0XA
+*.zip
+*.dmg
+
+# Wrangler cache
+.wrangler/
+wrangler.toml.bak
+
+# Logs
+*.log
+firebase-debug.log
+.DS_Store
+*.psd
+
+# Node
+node_modules/
+out/*.map
+
+# Temp
+tmp/

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# CY — launcher wrapper.
+#
+# VS Code Codex extension resolves its bundled backend at
+#   <ext>/bin/<platform>/codex
+# so this script takes that exact path. It:
+#   1. starts the local SYMBIOTYC <-> codex bridge (if not already up),
+#   2. isolates CY state under ~/.cy,
+#   3. exec's the real codex core.
+#
+# The real backend is kept at the same directory as `cy-core`.
+set -euo pipefail
+
+# Resolve this script's directory regardless of how it was invoked.
+SCRIPT_SRC="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SCRIPT_SRC" ]; do SCRIPT_SRC="$(readlink "$SCRIPT_SRC")"; done
+DIR="$(cd "$(dirname "$SCRIPT_SRC")" >/dev/null 2>&1 && pwd)"
+cd "$DIR"
+
+# --- locate node (VS Code launches without user's PATH) ---------------------
+_find_node() {
+  # 1. already in PATH
+  if command -v node >/dev/null 2>&1; then return 0; fi
+  # 2. common fixed locations
+  for _p in \
+    /Users/imac/Tools/node/node-v23.9.0-darwin-x64/bin \
+    /usr/local/bin \
+    /opt/homebrew/bin \
+    /opt/homebrew/opt/node/bin \
+    /opt/local/bin \
+    /usr/bin; do
+    if [ -x "$_p/node" ]; then
+      export PATH="$_p:$PATH"
+      return 0
+    fi
+  done
+  # 3. nvm (if shell profile exists)
+  for _nvm in \
+    "$HOME/.nvm/versions/node" \
+    "/Users/imac/.nvm/versions/node"; do
+    if [ -d "$_nvm" ]; then
+      _latest=$(ls -1 "$_nvm" 2>/dev/null | sort -V | tail -1)
+      if [ -n "$_latest" ] && [ -x "$_nvm/$_latest/bin/node" ]; then
+        export PATH="$_nvm/$_latest/bin:$PATH"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+_find_node || true
+
+export CY_HOME="${CY_HOME:-$HOME/.cy}"
+export CODEX_HOME="${CODEX_HOME:-$CY_HOME}"
+export CY_CODEX_HOME="${CODEX_HOME}"
+export PATH="$DIR:$DIR/codex-path:$PATH"
+
+mkdir -p "$CY_HOME"
+
+# --- SYMBIOTYC provider config (isolated, never ~/.codex) -------------------
+CY_CONFIG="$CY_HOME/config.toml"
+CY_MARKER="$CY_HOME/.cy-symbiotyc-bridge-v2"
+CY_BRIDGE_PORT="${CY_BRIDGE_PORT:-8790}"
+CY_BRIDGE_URL="http://127.0.0.1:${CY_BRIDGE_PORT}/v1"
+CY_MODEL="${CY_MODEL:-cy/i1a}"
+CY_API_KEY="${CY_API_KEY:-cfat_KbYOsjGncELIzKQn3WxUIz9jL97n9nJK2I1EG4hg35627bee}"
+
+if [ ! -f "$CY_MARKER" ] || [ ! -f "$CY_CONFIG" ]; then
+  cat > "$CY_CONFIG" <<EOF
+model = "$CY_MODEL"
+model_provider = "symbiotyc"
+
+[model_providers.symbiotyc]
+name = "symbiotyc"
+base_url = "$CY_BRIDGE_URL"
+wire_api = "responses"
+requires_openai_auth = false
+
+[model_providers.symbiotyc.headers]
+authorization = "Bearer $CY_API_KEY"
+
+model_context_window = 128000
+model_auto_compact_token_limit = 96000
+model_reasoning_summary = "auto"
+EOF
+  cat > "$CY_HOME/auth.json" <<EOF
+{
+  "provider": "symbiotyc",
+  "api_key": "$CY_API_KEY"
+}
+EOF
+  : > "$CY_MARKER"
+fi
+
+# --- bring up the bridge ----------------------------------------------------
+CY_BRIDGE="$DIR/cy-adapter.mjs"
+CY_BRIDGE_PORT=8790
+CY_BRIDGE_HOST=127.0.0.1
+CY_BRIDGE_LOG="$CY_HOME/bridge.log"
+
+is_port_open() {
+  node -e "const net=require('net');const s=net.connect($CY_BRIDGE_PORT,'$CY_BRIDGE_HOST');s.on('connect',()=>{s.destroy();process.exit(0)});s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),400)" 2>/dev/null
+}
+
+if [ -f "$CY_BRIDGE" ] && command -v node >/dev/null 2>&1; then
+  if ! is_port_open; then
+    nohup node "$CY_BRIDGE" > "$CY_BRIDGE_LOG" 2>&1 &
+    for _ in $(seq 1 50); do
+      is_port_open && break
+      sleep 0.1
+    done
+  fi
+fi
+
+# --- exec the real backend --------------------------------------------------
+exec "$DIR/cy-core" "$@"

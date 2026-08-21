@@ -1,0 +1,1 @@
+import{n as e,t}from"./align-horizontal-justify-start-dGbw16to-IC4Perec.js";t();export{e as default};

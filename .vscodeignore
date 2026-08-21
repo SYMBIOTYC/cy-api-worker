@@ -1,0 +1,17 @@
+# Excluded from the CY package (dev-only material).
+.vscode/**
+node_modules/**
+scripts/**
+tests/**
+**/*.vsix
+**/*.log
+**/.DS_Store
+**/*.psd
+firebase-debug.log
+
+# Platform binaries — only other platforms are excluded; macos-x86_64 is bundled
+bin/macos-arm64/**
+bin/linux-x64/**
+bin/linux-arm64/**
+bin/win32-x64/**
+bin/win32-arm64/**
