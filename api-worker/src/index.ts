@@ -158,10 +158,11 @@ export default {
         'User-Agent': 'CY-Compute-Tunnel/1.0',
       };
       if (upstreamKey) headers['Authorization'] = `Bearer ${upstreamKey}`;
+      const upstreamBody = { ...body, model: 'kilo-auto/free' };
       const res = await fetch(`${upstreamBase}${path}`, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body),
+        body: JSON.stringify(upstreamBody),
       });
       return res;
     }
