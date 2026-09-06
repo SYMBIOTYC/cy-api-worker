@@ -270,6 +270,61 @@ export default {
       }
     }
 
+    // --- User Usage Stats ---
+    if (request.method === 'GET' && url.pathname.startsWith('/admin/users/') && url.pathname.endsWith('/usage')) {
+      try {
+        const userId = url.pathname.replace('/admin/users/', '').replace('/usage', '');
+        const user = await env.PLATFORM_DB.prepare(
+          'SELECT id, email, plan, quota_requests, quota_used, quota_reset_at, billing_status, created_at FROM users WHERE id = ?'
+        ).bind(userId).first();
+        if (!user) {
+          return new Response(JSON.stringify({ error: { message: 'User not found' } }), {
+            status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
+        const usageResult = await env.PLATFORM_DB.prepare(
+          'SELECT endpoint, COUNT(*) as count, SUM(tokens_used) as tokens, SUM(cost) as cost, DATE(created_at) as date FROM usage_logs WHERE user_id = ? GROUP BY DATE(created_at), endpoint ORDER BY date DESC LIMIT 30'
+        ).bind(user.email).all();
+        const totalTokens = usageResult.results.reduce((sum: number, r: any) => sum + (r.tokens || 0), 0);
+        const totalRequests = usageResult.results.reduce((sum: number, r: any) => sum + (r.count || 0), 0);
+        return new Response(JSON.stringify({
+          user: { id: user.id, email: user.email, plan: user.plan, quotaRequests: user.quota_requests, quotaUsed: user.quota_used, quotaResetAt: user.quota_reset_at, billingStatus: user.billing_status, createdAt: user.created_at },
+          usage: usageResult.results,
+          totals: { requests: totalRequests, tokens: totalTokens },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: { message: 'Failed to get usage' } }), {
+          status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+    }
+
+    // --- Billing Dashboard HTML ---
+    if (request.method === 'GET' && url.pathname === '/admin/billing/html') {
+      try {
+        const usersResult = await env.PLATFORM_DB.prepare(
+          'SELECT id, email, plan, quota_requests, quota_used, billing_status, created_at FROM users ORDER BY created_at DESC'
+        ).all();
+        const billingResult = await env.PLATFORM_DB.prepare(
+          'SELECT id, user_id, amount, currency, status, provider, created_at FROM billing_events ORDER BY created_at DESC LIMIT 50'
+        ).all();
+        const users = usersResult.results.map((r: any) => `<tr><td>${r.email}</td><td>${r.plan}</td><td>${r.quota_used}/${r.quota_requests}</td><td>${r.billing_status}</td><td>${r.created_at}</td></tr>`).join('');
+        const events = billingResult.results.map((r: any) => `<tr><td>${r.user_id}</td><td>${r.amount} ${r.currency}</td><td>${r.status}</td><td>${r.provider}</td><td>${r.created_at}</td></tr>`).join('');
+        const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>CY Billing</title><style>body{font-family:-apple-system,sans-serif;background:#050505;color:#fff;padding:20px}h1{letter-spacing:4px}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{text-align:left;padding:8px;border-bottom:1px solid rgba(255,255,255,0.1);font-size:13px}th{color:rgba(255,255,255,0.5);text-transform:uppercase;font-size:11px}.card{background:#0a0a0a;border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:20px;margin:16px 0}</style></head><body><h1>CY Billing</h1><div class="card"><h2>Users</h2><table><tr><th>Email</th><th>Plan</th><th>Quota</th><th>Status</th><th>Created</th></tr>${users}</table></div><div class="card"><h2>Billing Events</h2><table><tr><th>User</th><th>Amount</th><th>Status</th><th>Provider</th><th>Date</th></tr>${events}</table></div></body></html>`;
+        return new Response(html, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html', ...corsHeaders },
+        });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: { message: 'Failed to render billing' } }), {
+          status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+    }
+
     // --- User Dashboard ---
     if (request.method === 'GET' && url.pathname === '/dashboard') {
       try {
