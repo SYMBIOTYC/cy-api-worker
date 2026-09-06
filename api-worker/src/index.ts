@@ -11,6 +11,10 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
+    if (url.pathname.startsWith('/v2/')) {
+      url.pathname = '/v1/' + url.pathname.slice(4);
+    }
+
     if (request.method === 'GET' && url.pathname === '/health') {
       return new Response(JSON.stringify({ status: 'ok', model: 'cy/i1a', provider: 'symbiotyc' }), {
         status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders },
@@ -28,11 +32,52 @@ export default {
     }
 
     async function findUserByApiKey(apiKey: string): Promise<any> {
-      const email = await env.PLATFORM_KV.get(`apikey:${apiKey}`, { type: 'text' });
-      if (!email) return null;
-      const userKey = `user:${email}`;
-      const user = await env.PLATFORM_KV.get(userKey, { type: 'json' });
-      return user;
+      try {
+        const result = await env.PLATFORM_DB.prepare(
+          'SELECT id, email, plan, quota_requests, quota_used, quota_reset_at, billing_status FROM users WHERE api_key = ?'
+        ).bind(apiKey).first();
+        return result || null;
+      } catch {
+        return null;
+      }
+    }
+
+    async function getUserByEmail(email: string): Promise<any> {
+      try {
+        const result = await env.PLATFORM_DB.prepare(
+          'SELECT id, email, plan, quota_requests, quota_used, quota_reset_at, billing_status FROM users WHERE email = ?'
+        ).bind(email).first();
+        return result || null;
+      } catch {
+        return null;
+      }
+    }
+
+    async function checkQuota(email: string): Promise<any> {
+      const user = await getUserByEmail(email);
+      if (!user) return { ok: false, error: 'User not found' };
+      if (user.billing_status !== 'active') return { ok: false, error: 'Account inactive' };
+      const now = new Date();
+      const resetAt = new Date(user.quota_reset_at);
+      if (now > resetAt) {
+        await env.PLATFORM_DB.prepare(
+          'UPDATE users SET quota_used = 0, quota_reset_at = ?, updated_at = datetime(\'now\') WHERE email = ?'
+        ).bind(new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(), email).run();
+        user.quota_used = 0;
+      }
+      if (user.quota_used >= user.quota_requests) {
+        return { ok: false, error: 'Quota exceeded', user };
+      }
+      return { ok: true, user };
+    }
+
+    async function incrementQuota(email: string, tokens: number = 0): Promise<void> {
+      await env.PLATFORM_DB.prepare(
+        'UPDATE users SET quota_used = quota_used + 1, updated_at = datetime(\'now\') WHERE email = ?'
+      ).bind(email).run();
+      await env.PLATFORM_DB.prepare(
+        'INSERT INTO usage_logs (user_id, endpoint, tokens_used, cost, model) VALUES (?, ?, ?, ?, ?)'
+      ).bind(email, '/v1/chat/completions', tokens, 0, 'cy/i1a').run();
     }
 
     async function authenticate(request: Request): Promise<string | null> {
@@ -50,13 +95,13 @@ export default {
             return payload['https://api.symbiotyc.workers.dev/profile']?.email || null;
           } catch {}
         }
-        const email = await env.PLATFORM_KV.get(`apikey:${token}`, { type: 'text' });
-        if (email) return email;
+        const user = await findUserByApiKey(token);
+        if (user) return user.email;
       }
       const apiKey = request.headers.get('X-API-Key');
       if (apiKey) {
-        const email = await env.PLATFORM_KV.get(`apikey:${apiKey}`, { type: 'text' });
-        if (email) return email;
+        const user = await findUserByApiKey(apiKey);
+        if (user) return user.email;
       }
       if (isLocalhost) return 'local@symbiotyc.dev';
       return null;
@@ -227,20 +272,25 @@ export default {
           });
         }
 
-        const userKey = `user:${email.toLowerCase()}`;
-        const existing = await env.PLATFORM_KV.get(userKey, { type: 'json' });
+        const userKey = email.toLowerCase();
+        const existing = await env.PLATFORM_DB.prepare(
+          'SELECT api_key FROM users WHERE email = ?'
+        ).bind(userKey).first();
         let apiKey = existing?.api_key;
         if (!apiKey) {
           apiKey = 'cfat_' + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
-          await env.PLATFORM_KV.put(userKey, JSON.stringify({
-            email: email.toLowerCase(),
-            name: email.toLowerCase(),
-            api_key: apiKey,
-            provider: 'symbiotyc',
-            model: 'cy/i1a',
-            created_at: new Date().toISOString(),
-          }));
-          await env.PLATFORM_KV.put(`apikey:${apiKey}`, email.toLowerCase());
+          await env.PLATFORM_DB.prepare(
+            'INSERT INTO users (id, email, api_key, plan, quota_requests, quota_used, quota_reset_at, billing_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime(\'now\'), datetime(\'now\'))'
+          ).bind(
+            'user-' + crypto.randomUUID(),
+            userKey,
+            apiKey,
+            'free',
+            1000,
+            0,
+            new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+            'active'
+          ).run();
         }
 
         return new Response(JSON.stringify({
@@ -263,7 +313,7 @@ export default {
 
         if (type === 'cy') {
           const loginId = 'cy-login-' + Math.random().toString(36).slice(2, 10);
-          const authUrl = 'https://platform.symbiotyc.workers.dev/api-keys';
+          const authUrl = 'https://auth.symbiotyc.workers.dev/';
           return new Response(JSON.stringify({ type: 'cy', loginId, authUrl }), {
             headers: { 'Content-Type': 'application/json', ...corsHeaders },
           });
@@ -332,6 +382,15 @@ export default {
         });
       }
 
+      if (user !== 'local@symbiotyc.dev') {
+        const quota = await checkQuota(user);
+        if (!quota.ok) {
+          return new Response(JSON.stringify({ error: { message: quota.error || 'Quota exceeded' } }), {
+            status: 429, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
+      }
+
       try {
         const body = await request.json() as any;
         const messages = body.messages || [];
@@ -363,16 +422,38 @@ export default {
         }
 
         if (!upstreamRes.ok || upstreamData.error) {
-          const msg = upstreamData && upstreamData.error ? String(upstreamData.error.message || '') : '';
-          const code = upstreamData && upstreamData.error ? String(upstreamData.error.code || '') : '';
-          const forbidden = ['openrouter', 'kilo-auto', 'kilo/', ':free', 'stepfun', 'nemotron', 'provider', 'system_fingerprint', 'service_tier', 'error_type', 'paid_model_auth_required', 'sign in', 'signin'];
-          if (forbidden.some((t) => msg.toLowerCase().includes(t.toLowerCase()) || code.toLowerCase().includes(t.toLowerCase()))) {
-            return new Response(JSON.stringify({ error: { message: 'CY: this layer requires authorization.' } }), {
-              status: 402, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          const upstreamMsg = upstreamData && upstreamData.error ? String(upstreamData.error.message || '') : '';
+          const upstreamCode = upstreamData && upstreamData.error ? String(upstreamData.error.code || '') : '';
+          const brandingLeaks = ['openrouter', 'kilo-auto', 'kilo/', ':free', 'stepfun', 'nemotron', 'liquidai', 'lfm', 'chatgpt', 'codex'];
+          const hasBrandingLeak = brandingLeaks.some((t) =>
+            upstreamMsg.toLowerCase().includes(t.toLowerCase()) ||
+            upstreamCode.toLowerCase().includes(t.toLowerCase())
+          );
+          if (hasBrandingLeak) {
+            const sanitized = upstreamMsg
+              .replace(/\bOpenRouter\b/gi, 'SYMBIOTYC')
+              .replace(/\bkilo-auto\b/gi, 'CY')
+              .replace(/\bPoolside\b/gi, 'SYMBIOTYC')
+              .replace(/\bStepfun\b/gi, 'SYMBIOTYC')
+              .replace(/\bNemotron\b/gi, 'SYMBIOTYC')
+              .replace(/\bLiquidAI\b/gi, 'SYMBIOTYC')
+              .replace(/\bLFM\b/gi, 'CY')
+              .replace(/\bChatGPT\b/gi, 'CY')
+              .replace(/\bCodex\b/gi, 'CY');
+            return new Response(JSON.stringify({
+              error: {
+                message: sanitized || 'CY: upstream error',
+                code: upstreamCode || 'upstream_error',
+                type: 'upstream_error',
+              },
+            }), {
+              status: upstreamRes.status,
+              headers: { 'Content-Type': 'application/json', ...corsHeaders },
             });
           }
-          return new Response(JSON.stringify({ error: { message: 'CY: carrier rejected' } }), {
-            status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          return new Response(JSON.stringify(upstreamData.error || { message: 'CY: upstream error' }), {
+            status: upstreamRes.status,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders },
           });
         }
 
@@ -383,6 +464,11 @@ export default {
           for (const c of final.choices) {
             if (c && c.message) c.message.model = 'cy/i1a';
           }
+        }
+
+        if (user !== 'local@symbiotyc.dev') {
+          const tokensUsed = final.usage?.total_tokens || 0;
+          ctx.waitUntil(incrementQuota(user, tokensUsed));
         }
 
         return new Response(JSON.stringify(final), {
@@ -402,6 +488,15 @@ export default {
         return new Response(JSON.stringify({ error: { message: 'Unauthorized' } }), {
           status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders },
         });
+      }
+
+      if (user !== 'local@symbiotyc.dev') {
+        const quota = await checkQuota(user);
+        if (!quota.ok) {
+          return new Response(JSON.stringify({ error: { message: quota.error || 'Quota exceeded' } }), {
+            status: 429, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
       }
 
       try {
@@ -448,16 +543,38 @@ export default {
         }
 
         if (!upstreamRes.ok || chatData.error) {
-          const msg = chatData && chatData.error ? String(chatData.error.message || '') : '';
-          const code = chatData && chatData.error ? String(chatData.error.code || '') : '';
-          const forbidden = ['openrouter', 'kilo-auto', 'kilo/', ':free', 'stepfun', 'nemotron', 'provider', 'system_fingerprint', 'service_tier', 'error_type', 'paid_model_auth_required', 'sign in', 'signin'];
-          if (forbidden.some((t) => msg.toLowerCase().includes(t.toLowerCase()) || code.toLowerCase().includes(t.toLowerCase()))) {
-            return new Response(JSON.stringify({ error: { message: 'CY: this layer requires authorization.' } }), {
-              status: 402, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          const upstreamMsg = chatData && chatData.error ? String(chatData.error.message || '') : '';
+          const upstreamCode = chatData && chatData.error ? String(chatData.error.code || '') : '';
+          const brandingLeaks = ['openrouter', 'kilo-auto', 'kilo/', ':free', 'stepfun', 'nemotron', 'liquidai', 'lfm', 'chatgpt', 'codex'];
+          const hasBrandingLeak = brandingLeaks.some((t) =>
+            upstreamMsg.toLowerCase().includes(t.toLowerCase()) ||
+            upstreamCode.toLowerCase().includes(t.toLowerCase())
+          );
+          if (hasBrandingLeak) {
+            const sanitized = upstreamMsg
+              .replace(/\bOpenRouter\b/gi, 'SYMBIOTYC')
+              .replace(/\bkilo-auto\b/gi, 'CY')
+              .replace(/\bPoolside\b/gi, 'SYMBIOTYC')
+              .replace(/\bStepfun\b/gi, 'SYMBIOTYC')
+              .replace(/\bNemotron\b/gi, 'SYMBIOTYC')
+              .replace(/\bLiquidAI\b/gi, 'SYMBIOTYC')
+              .replace(/\bLFM\b/gi, 'CY')
+              .replace(/\bChatGPT\b/gi, 'CY')
+              .replace(/\bCodex\b/gi, 'CY');
+            return new Response(JSON.stringify({
+              error: {
+                message: sanitized || 'CY: upstream error',
+                code: upstreamCode || 'upstream_error',
+                type: 'upstream_error',
+              },
+            }), {
+              status: upstreamRes.status,
+              headers: { 'Content-Type': 'application/json', ...corsHeaders },
             });
           }
-          return new Response(JSON.stringify({ error: { message: 'CY: carrier rejected' } }), {
-            status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          return new Response(JSON.stringify(upstreamData.error || { message: 'CY: upstream error' }), {
+            status: upstreamRes.status,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders },
           });
         }
 
@@ -485,6 +602,11 @@ export default {
             total_tokens: final.usage.total_tokens || 0,
           } : undefined,
         };
+
+        if (user !== 'local@symbiotyc.dev') {
+          const tokensUsed = response.usage?.total_tokens || 0;
+          ctx.waitUntil(incrementQuota(user, tokensUsed));
+        }
 
         return new Response(JSON.stringify(response), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders },
