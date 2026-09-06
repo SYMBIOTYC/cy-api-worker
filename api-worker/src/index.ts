@@ -50,6 +50,8 @@ export default {
             return payload['https://api.symbiotyc.workers.dev/profile']?.email || null;
           } catch {}
         }
+        const email = await env.PLATFORM_KV.get(`apikey:${token}`, { type: 'text' });
+        if (email) return email;
       }
       const apiKey = request.headers.get('X-API-Key');
       if (apiKey) {
