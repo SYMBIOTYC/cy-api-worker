@@ -194,20 +194,22 @@ export default {
           });
         }
 
-        const userKey = `user:${email}`;
-        const existing = await env.PLATFORM_KV.get(userKey, { type: 'json' });
-        let apiKey = existing?.apiKey;
+        const userKey = email;
+        const existing = await env.PLATFORM_DB.prepare(
+          'SELECT id, email, api_key FROM users WHERE email = ?'
+        ).bind(userKey).first();
+        let apiKey = existing?.api_key;
         if (!apiKey) {
           apiKey = generateApiKey();
-          await env.PLATFORM_KV.put(userKey, JSON.stringify({
-            email,
-            name: tokenInfo.name || email,
-            api_key: apiKey,
-            provider: 'symbiotyc',
-            model: 'cy/i1a',
-            created_at: new Date().toISOString(),
-          }));
-          await env.PLATFORM_KV.put(`apikey:${apiKey}`, email);
+          if (existing) {
+            await env.PLATFORM_DB.prepare(
+              'UPDATE users SET api_key = ?, updated_at = datetime(\'now\') WHERE email = ?'
+            ).bind(apiKey, userKey).run();
+          } else {
+            await env.PLATFORM_DB.prepare(
+              'INSERT INTO users (id, email, name, api_key, provider, model, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime(\'now\'))'
+            ).bind(crypto.randomUUID(), userKey, tokenInfo.name || email, apiKey, 'symbiotyc', 'cy/i1a').run();
+          }
         }
 
         return new Response(JSON.stringify({
@@ -232,20 +234,22 @@ export default {
           });
         }
 
-        const userKey = `user:${email}`;
-        const existing = await env.PLATFORM_KV.get(userKey, { type: 'json' });
+        const userKey = email;
+        const existing = await env.PLATFORM_DB.prepare(
+          'SELECT id, email, api_key FROM users WHERE email = ?'
+        ).bind(userKey).first();
         let apiKey = existing?.api_key;
         if (!apiKey) {
           apiKey = generateApiKey();
-          await env.PLATFORM_KV.put(userKey, JSON.stringify({
-            email,
-            name: email,
-            api_key: apiKey,
-            provider: 'symbiotyc',
-            model: 'cy/i1a',
-            created_at: new Date().toISOString(),
-          }));
-          await env.PLATFORM_KV.put(`apikey:${apiKey}`, email);
+          if (existing) {
+            await env.PLATFORM_DB.prepare(
+              'UPDATE users SET api_key = ?, updated_at = datetime(\'now\') WHERE email = ?'
+            ).bind(apiKey, userKey).run();
+          } else {
+            await env.PLATFORM_DB.prepare(
+              'INSERT INTO users (id, email, name, api_key, provider, model, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime(\'now\'))'
+            ).bind(crypto.randomUUID(), userKey, email, apiKey, 'symbiotyc', 'cy/i1a').run();
+          }
         }
 
         return new Response(JSON.stringify({
@@ -268,16 +272,19 @@ export default {
             status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders },
           });
         }
-        const userKey = `user:${body.email}`;
-        const existing = await env.PLATFORM_KV.get(userKey, { type: 'json' });
+        const userKey = body.email;
+        const existing = await env.PLATFORM_DB.prepare(
+          'SELECT id, email, api_key FROM users WHERE email = ?'
+        ).bind(userKey).first();
         if (!existing) {
           return new Response(JSON.stringify({ error: { message: 'User not found' } }), {
             status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders },
           });
         }
         const newKey = generateApiKey();
-        await env.PLATFORM_KV.put(userKey, JSON.stringify({ ...existing, api_key: newKey, updated_at: new Date().toISOString() }));
-        await env.PLATFORM_KV.put(`apikey:${newKey}`, existing.email);
+        await env.PLATFORM_DB.prepare(
+          'UPDATE users SET api_key = ?, updated_at = datetime(\'now\') WHERE email = ?'
+        ).bind(newKey, existing.email).run();
         return new Response(JSON.stringify({ user: { email: existing.email, apiKey: newKey } }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders },
         });
