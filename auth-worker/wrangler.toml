@@ -1,0 +1,9 @@
+name = "auth"
+main = "src/index.ts"
+compatibility_date = "2026-08-18"
+account_id = "d9c9f1882a0a73e0a592e4470b85e0b4"
+
+[[d1_databases]]
+binding = "PLATFORM_DB"
+database_name = "cy-platform"
+database_id = "570fcd3e-509c-4642-82a4-39123474749f"
