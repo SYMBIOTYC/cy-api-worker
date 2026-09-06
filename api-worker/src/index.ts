@@ -159,7 +159,6 @@ export default {
         .replace(/\bLiquidAI\b/gi, 'SYMBIOTYC')
         .replace(/\bLFM\b/g, 'CY')
         .replace(/\blfm\b/g, 'cy')
-        .replace(/\bOpenAI\b/gi, 'SYMBIOTYC')
         .replace(/\bChatGPT\b/g, 'CY')
         .replace(/\bCodex\b/g, 'CY')
         .replace(/\bcodex\b/g, 'cy');

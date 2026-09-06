@@ -13,29 +13,69 @@ export default {
 
     const origin = url.origin;
 
-    // --- API Key Creation ---
-    if (request.method === 'POST' && url.pathname === '/api/auth/key') {
+    // --- Google OAuth: Redirect to Google ---
+    if (request.method === 'GET' && url.pathname === '/auth/google') {
+      const clientId = env.GOOGLE_CLIENT_ID;
+      const redirectUri = origin + '/auth/google/callback';
+      const state = crypto.randomUUID();
+      const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid email profile&state=${state}&access_type=offline&prompt=consent`;
+      return Response.redirect(googleAuthUrl, 302);
+    }
+
+    // --- Google OAuth: Callback ---
+    if (request.method === 'GET' && url.pathname === '/auth/google/callback') {
       try {
-        const body = await request.json() as Record<string, any>;
-        const email = body.email;
-        if (!email || typeof email !== 'string' || !email.includes('@')) {
-          return new Response(JSON.stringify({ error: { message: 'Valid email required' } }), {
-            status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders },
-          });
+        const code = url.searchParams.get('code');
+        if (!code) {
+          return new Response('Missing code', { status: 400 });
         }
 
-        const userKey = email.toLowerCase();
+        const clientId = env.GOOGLE_CLIENT_ID;
+        const clientSecret = env.GOOGLE_CLIENT_SECRET;
+        const redirectUri = origin + '/auth/google/callback';
+
+        // Exchange code for tokens
+        const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            code,
+            client_id: clientId,
+            client_secret: clientSecret,
+            redirect_uri: redirectUri,
+            grant_type: 'authorization_code',
+          }),
+        });
+        const tokenData = await tokenRes.json() as any;
+        if (!tokenData.access_token) {
+          return new Response('Token exchange failed: ' + JSON.stringify(tokenData), { status: 400 });
+        }
+
+        // Get user info from Google
+        const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+          headers: { Authorization: `Bearer ${tokenData.access_token}` },
+        });
+        const googleUser = await userRes.json() as any;
+        const email = googleUser.email;
+        if (!email) {
+          return new Response('No email from Google', { status: 400 });
+        }
+
+        // Find or create user in D1
         const existing = await env.PLATFORM_DB.prepare(
           'SELECT api_key FROM users WHERE email = ?'
-        ).bind(userKey).first();
+        ).bind(email).first();
+
         let apiKey = existing?.api_key;
+        let isNew = false;
         if (!apiKey) {
           apiKey = 'cfat_' + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+          isNew = true;
           await env.PLATFORM_DB.prepare(
             'INSERT INTO users (id, email, api_key, plan, quota_requests, quota_used, quota_reset_at, billing_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime(\'now\'), datetime(\'now\'))'
           ).bind(
             'user-' + crypto.randomUUID(),
-            userKey,
+            email,
             apiKey,
             'free',
             1000,
@@ -45,9 +85,45 @@ export default {
           ).run();
         }
 
-        return new Response(JSON.stringify({
-          user: { email: userKey, name: userKey, apiKey },
-        }), {
+        // Redirect to dashboard with API key shown
+        const dashUrl = new URL(origin + '/dashboard');
+        dashUrl.searchParams.set('key', apiKey);
+        return Response.redirect(dashUrl.toString(), 302);
+      } catch (e: any) {
+        return new Response('Auth error: ' + e.message, { status: 500 });
+      }
+    }
+
+    // --- API Key by email (for CLI / programmatic access) ---
+    if (request.method === 'POST' && url.pathname === '/api/auth/key') {
+      try {
+        const body = await request.json() as Record<string, any>;
+        const email = body.email;
+        if (!email || typeof email !== 'string' || !email.includes('@')) {
+          return new Response(JSON.stringify({ error: { message: 'Valid email required' } }), {
+            status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
+        const existing = await env.PLATFORM_DB.prepare(
+          'SELECT api_key FROM users WHERE email = ?'
+        ).bind(email).first();
+        let apiKey = existing?.api_key;
+        if (!apiKey) {
+          apiKey = 'cfat_' + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+          await env.PLATFORM_DB.prepare(
+            'INSERT INTO users (id, email, api_key, plan, quota_requests, quota_used, quota_reset_at, billing_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime(\'now\'), datetime(\'now\'))'
+          ).bind(
+            'user-' + crypto.randomUUID(),
+            email,
+            apiKey,
+            'free',
+            1000,
+            0,
+            new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+            'active'
+          ).run();
+        }
+        return new Response(JSON.stringify({ user: { email, apiKey } }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders },
         });
       } catch (e: any) {
@@ -121,6 +197,34 @@ export default {
       }
     }
 
+    // --- List Billing Events ---
+    if (request.method === 'GET' && url.pathname === '/admin/billing') {
+      try {
+        const result = await env.PLATFORM_DB.prepare(
+          'SELECT id, user_id, amount, currency, status, provider, external_id, metadata, created_at FROM billing_events ORDER BY created_at DESC LIMIT 100'
+        ).all();
+        const events = result.results.map((row: any) => ({
+          id: row.id,
+          userId: row.user_id,
+          amount: row.amount,
+          currency: row.currency,
+          status: row.status,
+          provider: row.provider,
+          externalId: row.external_id,
+          metadata: row.metadata ? JSON.parse(row.metadata) : null,
+          createdAt: row.created_at,
+        }));
+        return new Response(JSON.stringify({ events, count: events.length }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: { message: 'Failed to list billing events' } }), {
+          status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+    }
+
     // --- Stripe Webhook ---
     if (request.method === 'POST' && url.pathname === '/admin/webhooks/stripe') {
       try {
@@ -169,41 +273,38 @@ export default {
     // --- User Dashboard ---
     if (request.method === 'GET' && url.pathname === '/dashboard') {
       try {
-        const authHeader = request.headers.get('Authorization');
-        const apiKeyHeader = request.headers.get('X-API-Key');
-        let email: string | null = null;
-
-        if (authHeader?.startsWith('Bearer ')) {
-          const token = authHeader.slice(7);
-          const result = await env.PLATFORM_DB.prepare(
-            'SELECT email FROM users WHERE api_key = ?'
-          ).bind(token).first();
-          if (result) email = result.email;
-        }
-        if (!email && apiKeyHeader) {
-          const result = await env.PLATFORM_DB.prepare(
-            'SELECT email FROM users WHERE api_key = ?'
-          ).bind(apiKeyHeader).first();
-          if (result) email = result.email;
+        // Get API key from query param or header
+        let apiKey = url.searchParams.get('key');
+        if (!apiKey) {
+          const authHeader = request.headers.get('Authorization');
+          const apiKeyHeader = request.headers.get('X-API-Key');
+          if (authHeader?.startsWith('Bearer ')) apiKey = authHeader.slice(7);
+          if (!apiKey && apiKeyHeader) apiKey = apiKeyHeader;
         }
 
-        if (!email) {
+        if (!apiKey) {
           return new Response(JSON.stringify({ error: { message: 'Unauthorized' } }), {
             status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders },
           });
         }
 
         const user = await env.PLATFORM_DB.prepare(
-          'SELECT id, email, plan, quota_requests, quota_used, quota_reset_at, billing_status, created_at FROM users WHERE email = ?'
-        ).bind(email).first();
+          'SELECT id, email, api_key, plan, quota_requests, quota_used, quota_reset_at, billing_status, created_at FROM users WHERE api_key = ?'
+        ).bind(apiKey).first();
+
+        if (!user) {
+          return new Response(JSON.stringify({ error: { message: 'User not found' } }), {
+            status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
 
         const usageResult = await env.PLATFORM_DB.prepare(
           'SELECT endpoint, COUNT(*) as count, SUM(tokens_used) as tokens, SUM(cost) as cost, DATE(created_at) as date FROM usage_logs WHERE user_id = ? GROUP BY DATE(created_at), endpoint ORDER BY date DESC LIMIT 30'
-        ).bind(email).all();
+        ).bind(user.email).all();
 
         const invoicesResult = await env.PLATFORM_DB.prepare(
           'SELECT id, amount, currency, status, provider, created_at FROM billing_events WHERE user_id = ? ORDER BY created_at DESC LIMIT 10'
-        ).bind(email).all();
+        ).bind(user.email).all();
 
         const html = `<!DOCTYPE html>
 <html lang="ru">
@@ -245,11 +346,15 @@ export default {
     </div>
 
     <div class="card">
+      <div class="card-title">Email</div>
+      <div style="font-size:14px;">${user.email}</div>
+    </div>
+
+    <div class="card">
       <div class="card-title">API Key</div>
       <div class="api-key">${user.api_key || '***'}</div>
       <div class="actions">
         <button class="btn" onclick="navigator.clipboard.writeText('${user.api_key || ''}').then(()=>alert('Copied'))">Copy</button>
-        <button class="btn btn-secondary" onclick="alert('Revoke not implemented yet')">Revoke</button>
       </div>
     </div>
 
@@ -307,7 +412,7 @@ export default {
       }
     }
 
-    // --- Connect Page ---
+    // --- Connect Page (Sign with Google) ---
     if (request.method === 'GET' && url.pathname === '/') {
       const html = `<!DOCTYPE html>
 <html lang="ru">
@@ -319,90 +424,26 @@ export default {
   :root { --bg:#050505; --surface:#0a0a0a; --text:#ffffff; --text-secondary:rgba(255,255,255,0.6); --border:rgba(255,255,255,0.1); --accent:#ffffff; --glow:rgba(255,255,255,0.15); }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, sans-serif; height: 100%; display: flex; align-items: center; justify-content: center; padding: 20px; }
-  .card { max-width: 420px; width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px; box-shadow: 0 0 40px var(--glow); }
+  .card { max-width: 420px; width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px; box-shadow: 0 0 40px var(--glow); text-align: center; }
   .logo { font-size: 48px; font-weight: 800; color: var(--accent); letter-spacing: 12px; text-align: center; margin-bottom: 8px; text-shadow: 0 0 20px var(--glow); }
   .title { font-size: 12px; color: var(--text-secondary); letter-spacing: 4px; text-transform: uppercase; text-align: center; margin-bottom: 28px; font-family: monospace; }
-  .input { width: 100%; padding: 14px 16px; background: rgba(255,255,255,0.05); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-size: 14px; outline: none; margin-bottom: 16px; font-family: monospace; }
-  .input:focus { border-color: var(--accent); box-shadow: 0 0 12px var(--glow); }
-  .btn { width: 100%; padding: 14px; background: var(--accent); color: #050505; border: none; border-radius: 10px; font-weight: 700; font-size: 13px; letter-spacing: 2px; cursor: pointer; font-family: monospace; text-transform: uppercase; transition: all 0.2s; }
-  .btn:hover { box-shadow: 0 0 20px var(--glow); transform: translateY(-2px); }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .google-btn { display: inline-flex; align-items: center; gap: 10px; padding: 12px 24px; background: #ffffff; color: #000000; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  .google-btn:hover { box-shadow: 0 0 20px var(--glow); transform: translateY(-2px); }
+  .google-icon { width: 20px; height: 20px; }
   .status { margin-top: 16px; font-size: 12px; font-family: monospace; color: var(--text-secondary); min-height: 16px; text-align: center; }
   .status.error { color: #ff4444; }
-  .status.success { color: #00ff88; }
-  .key-box { margin-top: 16px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 8px; font-family: monospace; font-size: 11px; word-break: break-all; color: var(--text-secondary); display: none; }
-  .hidden { display: none !important; }
 </style>
 </head>
 <body>
   <div class="card">
     <div class="logo">CY</div>
     <div class="title">Connect</div>
-    <div id="step-email">
-      <input type="email" id="email" class="input" placeholder="you@email.com" autocomplete="email">
-      <button class="btn" id="connect-btn">Connect CY</button>
-      <div class="status" id="status"></div>
-    </div>
-    <div id="step-key" class="hidden">
-      <div class="status success" style="margin-bottom:12px;">Connected!</div>
-      <div class="key-box" id="key-box"></div>
-      <button class="btn" id="copy-btn" style="margin-top:12px;background:transparent;border:1px solid var(--accent);color:var(--accent);">Copy API Key</button>
-      <div class="status" id="key-status"></div>
-    </div>
+    <a href="${origin}/auth/google" class="google-btn">
+      <svg class="google-icon" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+      Sign with Google
+    </a>
+    <div class="status" id="status"></div>
   </div>
-<script>
-const API_BASE = location.origin;
-const emailInput = document.getElementById('email');
-const connectBtn = document.getElementById('connect-btn');
-const statusEl = document.getElementById('status');
-const stepEmail = document.getElementById('step-email');
-const stepKey = document.getElementById('step-key');
-const keyBox = document.getElementById('key-box');
-const copyBtn = document.getElementById('copy-btn');
-const keyStatus = document.getElementById('key-status');
-
-function setStatus(el, msg, type = '') {
-  el.textContent = msg;
-  el.className = 'status' + (type ? ' ' + type : '');
-}
-
-connectBtn.addEventListener('click', async () => {
-  const email = emailInput.value.trim();
-  if (!email || !email.includes('@')) {
-    setStatus(statusEl, 'Enter a valid email', 'error');
-    return;
-  }
-  connectBtn.disabled = true;
-  setStatus(statusEl, 'Connecting...', '');
-  try {
-    const res = await fetch(API_BASE + '/api/auth/key', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error?.message || 'Failed');
-    const apiKey = data.user?.apiKey;
-    if (!apiKey) throw new Error('No API key returned');
-    stepEmail.classList.add('hidden');
-    stepKey.classList.remove('hidden');
-    keyBox.textContent = apiKey;
-    setStatus(keyStatus, 'Save this key in CY: Settings → API Key', 'success');
-  } catch (e) {
-    setStatus(statusEl, e.message, 'error');
-    connectBtn.disabled = false;
-  }
-});
-
-copyBtn.addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(keyBox.textContent);
-    setStatus(keyStatus, 'Copied to clipboard', 'success');
-  } catch {
-    setStatus(keyStatus, 'Copy failed', 'error');
-  }
-});
-</script>
 </body>
 </html>`;
       return new Response(html, {
