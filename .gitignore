@@ -1,3 +1,6 @@
+# Secrets
+.secrets/
+
 # Large binaries - downloaded at build time
 bin/**/cy-core
 bin/**/cy
