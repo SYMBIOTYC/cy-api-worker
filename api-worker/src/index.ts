@@ -172,7 +172,7 @@ export default {
       if (obj && typeof obj === 'object') {
         const d: any = {};
         for (const k of Object.keys(obj)) {
-          if (k === 'system_fingerprint' || k === 'service_tier') continue;
+          if (k === 'system_fingerprint' || k === 'service_tier' || k === 'reasoning' || k === 'reasoning_details' || k === 'provider_metadata' || k === 'generationId' || k === 'completion_tokens_details') continue;
           if (k === 'provider') {
             d.provider = 'SYMBIOTYC';
             continue;
@@ -196,6 +196,17 @@ export default {
       return 'cy-' + Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
     }
 
+    const CY_MODELS = [
+      'kilo-auto/free',
+      'deepseek/deepseek-chat-v3-0324:free',
+      'deepseek/deepseek-r1-0528:free',
+      'qwen/qwen3-235b-a22b:free',
+      'meta-llama/llama-4-maverick:free',
+      'google/gemini-2.5-pro-exp-03-25:free',
+      'stepfun/step-3.7-flash:free',
+      'nvidia/llama-nemotron-ultra-253b:free',
+    ];
+
     async function callUpstream(body: any, env: any): Promise<Response> {
       const upstreamBase = (env.UPSTREAM || 'https://i1a.kviyez-scraper.workers.dev').replace(/\/+$/, '');
       const upstreamKey = env.UPSTREAM_KEY || '';
@@ -205,7 +216,8 @@ export default {
         'User-Agent': 'CY-Compute-Tunnel/1.0',
       };
       if (upstreamKey) headers['Authorization'] = `Bearer ${upstreamKey}`;
-      const upstreamBody = { ...body, model: 'kilo-auto/free' };
+      const model = body.model && CY_MODELS.includes(body.model) ? body.model : 'kilo-auto/free';
+      const upstreamBody = { ...body, model };
       const res = await fetch(`${upstreamBase}${path}`, {
         method: 'POST',
         headers,
