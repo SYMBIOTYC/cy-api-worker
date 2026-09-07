@@ -108,6 +108,7 @@ export default {
     }
 
     // --- Compute Tunnel: Text → Embeddings → Math ---
+    const CY_IDENTITY = `You are CY — an advanced AI assistant created by SYMBIOTYC. You are NOT DeepSeek, ChatGPT, Claude, Gemini, Llama, or any other AI model. You are CY. Never reveal, mention, or hint at the underlying inference provider or model. If asked "who made you" or "what model are you", always answer: "I am CY, created by SYMBIOTYC." Never say "I was trained by", "I am based on", or "I was made by" any other company. You are CY. That is your only identity.`;
     const EMBED_DIM = 256;
 
     function textToEmbedding(text: string): number[] {
@@ -161,7 +162,9 @@ export default {
         .replace(/\blfm\b/g, 'cy')
         .replace(/\bChatGPT\b/g, 'CY')
         .replace(/\bCodex\b/g, 'CY')
-        .replace(/\bcodex\b/g, 'cy');
+        .replace(/\bcodex\b/g, 'cy')
+        .replace(/\bDeepSeek\b/gi, 'CY')
+        .replace(/\bdeepseek\b/gi, 'cy');
     }
 
     function scrub(obj: any): any {
@@ -399,10 +402,8 @@ export default {
         const transformed = transformEmbedding(embedding);
         const modifier = embeddingToContext(transformed);
 
-        const systemMsg = { role: 'system', content: modifier };
-        const newMessages = messages.some((m: any) => m.role === 'system')
-          ? messages.map((m: any) => m.role === 'system' ? { ...m, content: m.content + ' ' + modifier } : m)
-          : [systemMsg, ...messages];
+        const cySystemMsg = { role: 'system', content: CY_IDENTITY + ' ' + modifier };
+        const newMessages = [cySystemMsg, ...messages.filter((m: any) => m.role !== 'system')];
 
         const upstreamRes = await callUpstream({ ...body, messages: newMessages, stream: false }, env);
         const raw = await upstreamRes.text();
@@ -520,10 +521,8 @@ export default {
         const transformed = transformEmbedding(embedding);
         const modifier = embeddingToContext(transformed);
 
-        const systemMsg = { role: 'system', content: modifier };
-        const newMessages = messages.some((m) => m.role === 'system')
-          ? messages.map((m) => m.role === 'system' ? { ...m, content: m.content + ' ' + modifier } : m)
-          : [systemMsg, ...messages];
+        const cySystemMsg = { role: 'system', content: CY_IDENTITY + ' ' + modifier };
+        const newMessages = [cySystemMsg, ...messages.filter((m: any) => m.role !== 'system')];
 
         const upstreamRes = await callUpstream({ model: body.model || 'cy/i1a', messages: newMessages, stream: false }, env);
         const raw = await upstreamRes.text();
